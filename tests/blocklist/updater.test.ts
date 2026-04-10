@@ -13,7 +13,7 @@ describe("Blocklist Updater", () => {
   describe("getApiConfig / setApiConfig", () => {
     it("should return default config", () => {
       const config = getApiConfig();
-      expect(config.listUrl).toContain("dijitalsavunma");
+      expect(config.listUrl).toContain("blocklist");
       expect(config.reportUrl).toContain("dijitalsavunma");
       expect(config.updateIntervalMinutes).toBe(360);
     });
@@ -27,35 +27,40 @@ describe("Blocklist Updater", () => {
   });
 
   describe("fetchRemoteBlocklist", () => {
-    it("should fetch and return domain count on success", async () => {
+    it("should fetch plain text list and return domain count", async () => {
       fetchMock.mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve({
-          domains: [
-            { domain: "phishing1.com" },
-            { domain: "phishing2.com" },
-          ],
-        }),
+        headers: { get: () => "text/plain" },
+        text: () => Promise.resolve("phishing1.com\nphishing2.com\n"),
       });
 
       const count = await fetchRemoteBlocklist();
       expect(count).toBe(2);
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining("blocklist"),
-        expect.objectContaining({ headers: { Accept: "application/json" } }),
-      );
+      expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("blocklist"));
     });
 
-    it("should support plain string array format", async () => {
+    it("should skip comments and empty lines in plain text", async () => {
       fetchMock.mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve({
-          domains: ["evil1.com", "evil2.com", "evil3.com"],
-        }),
+        headers: { get: () => "text/plain" },
+        text: () => Promise.resolve("# USOM blocklist\nevil1.com\n\nevil2.com\n# comment\nevil3.com\n"),
       });
 
       const count = await fetchRemoteBlocklist();
       expect(count).toBe(3);
+    });
+
+    it("should support JSON format with content-type hint", async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        headers: { get: () => "application/json" },
+        text: () => Promise.resolve(JSON.stringify({
+          domains: [{ domain: "a.com" }, { domain: "b.com" }],
+        })),
+      });
+
+      const count = await fetchRemoteBlocklist();
+      expect(count).toBe(2);
     });
 
     it("should return -1 on HTTP error", async () => {
@@ -72,10 +77,11 @@ describe("Blocklist Updater", () => {
       expect(count).toBe(-1);
     });
 
-    it("should return 0 when response has empty domains", async () => {
+    it("should return 0 when response is empty", async () => {
       fetchMock.mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve({ domains: [] }),
+        headers: { get: () => "text/plain" },
+        text: () => Promise.resolve(""),
       });
 
       const count = await fetchRemoteBlocklist();

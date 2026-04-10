@@ -1,4 +1,4 @@
-export { checkUrl, loadBlocklist, extractDomain, extractRootDomain } from "./url-checker";
+export { checkUrl, extractDomain, extractRootDomain, getBlocklistSize } from "./url-checker";
 export { analyzePage } from "./page-analyzer";
 export { ThreatLevel } from "@/utils/types";
 export type { ThreatResult } from "@/utils/types";

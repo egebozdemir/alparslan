@@ -24,12 +24,20 @@ export interface ExtensionSettings {
   protectionLevel: "low" | "medium" | "high";
   notificationsEnabled: boolean;
   whitelist: string[];
+  networkMonitoringEnabled: boolean;
+  networkBlockingEnabled: boolean;
+  urlCacheTtlMinutes: number;
+  showDomWarnings: boolean;
 }
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
   protectionLevel: "medium",
   notificationsEnabled: true,
   whitelist: [],
+  networkMonitoringEnabled: true,
+  networkBlockingEnabled: false,
+  urlCacheTtlMinutes: 5,
+  showDomWarnings: true,
 };
 
 export interface ExtensionStats {
@@ -60,7 +68,8 @@ export interface ScanHistoryEntry {
   checkedAt: number;
 }
 
-export const MAX_HISTORY_ENTRIES = 50;
+export const MAX_HISTORY_ENTRIES = 100;
+export const HISTORY_DISPLAY_LIMIT = 50;
 
 export interface ApiConfig {
   listUrl: string;
@@ -69,7 +78,7 @@ export interface ApiConfig {
 }
 
 export const DEFAULT_API_CONFIG: ApiConfig = {
-  listUrl: "https://api.dijitalsavunma.org/v1/blocklist",
+  listUrl: "https://cdn.jsdelivr.net/gh/AsabiAlgo/blocklists@main/usom-blocklist.txt",
   reportUrl: "https://api.dijitalsavunma.org/v1/reports",
   updateIntervalMinutes: 360, // 6 saat
 };

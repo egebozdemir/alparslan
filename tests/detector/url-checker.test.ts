@@ -1,13 +1,16 @@
+import "fake-indexeddb/auto";
 import { describe, it, expect, beforeEach } from "vitest";
 import {
   checkUrl,
-  loadBlocklist,
   extractDomain,
   extractRootDomain,
   levenshteinDistance,
   checkTyposquatting,
 } from "@/detector/url-checker";
 import { ThreatLevel } from "@/utils/types";
+import t from "@/i18n/tr";
+import { initListCache, addToBlacklist, resetListCache } from "@/storage/list-cache";
+import { getDb } from "@/storage/idb";
 
 describe("extractDomain", () => {
   it("should extract domain from valid URL", () => {
@@ -83,14 +86,21 @@ describe("checkTyposquatting", () => {
 });
 
 describe("checkUrl", () => {
-  beforeEach(() => {
-    loadBlocklist([], true);
+  beforeEach(async () => {
+    resetListCache();
+    const db = await getDb();
+    const tx = db.transaction(["whitelist", "blacklist", "metadata"], "readwrite");
+    tx.objectStore("whitelist").clear();
+    tx.objectStore("blacklist").clear();
+    tx.objectStore("metadata").clear();
+    await new Promise<void>((resolve) => { tx.oncomplete = () => resolve(); });
+    await initListCache();
   });
 
   it("should return UNKNOWN for invalid URL", () => {
     const result = checkUrl("not-a-url");
     expect(result.level).toBe(ThreatLevel.UNKNOWN);
-    expect(result.reasons).toContain("Gecersiz URL");
+    expect(result.reasons).toContain(t.reasons.invalidUrl);
   });
 
   it("should return SAFE for trusted domains", () => {
@@ -99,8 +109,8 @@ describe("checkUrl", () => {
     expect(result.score).toBe(0);
   });
 
-  it("should return DANGEROUS for blocklisted domains", () => {
-    loadBlocklist(["evil-phishing.com"]);
+  it("should return DANGEROUS for blocklisted domains", async () => {
+    await addToBlacklist([{ domain: "evil-phishing.com", category: "other", addedAt: "2026-01-01", source: "manual" }]);
     const result = checkUrl("https://evil-phishing.com/login");
     expect(result.level).toBe(ThreatLevel.DANGEROUS);
     expect(result.score).toBe(100);
@@ -140,8 +150,8 @@ describe("checkUrl", () => {
   });
 
   describe("protection levels", () => {
-    it("low: should only check blocklist", () => {
-      loadBlocklist(["evil.com"]);
+    it("low: should only check blocklist", async () => {
+      await addToBlacklist([{ domain: "evil.com", category: "other", addedAt: "2026-01-01", source: "manual" }]);
       // Blocklist still works
       const blocked = checkUrl("https://evil.com", "low");
       expect(blocked.level).toBe(ThreatLevel.DANGEROUS);

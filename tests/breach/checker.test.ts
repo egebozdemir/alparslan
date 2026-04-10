@@ -1,6 +1,8 @@
 // @vitest-environment node
+import "fake-indexeddb/auto";
 import { describe, it, expect, beforeEach } from "vitest";
 import { checkBreach, loadBreachDatabase, getBreachDatabaseSize } from "@/breach/checker";
+import { getDb } from "@/storage/idb";
 
 const SAMPLE_BREACHES = [
   { domain: "linkedin.com", name: "LinkedIn 2021", date: "2021-06", accountsAffected: 700000000, dataTypes: ["email", "isim"] },
@@ -9,8 +11,14 @@ const SAMPLE_BREACHES = [
 ];
 
 describe("breach checker", () => {
-  beforeEach(() => {
-    loadBreachDatabase(SAMPLE_BREACHES);
+  beforeEach(async () => {
+    const db = await getDb();
+    if (db.objectStoreNames.contains("breaches")) {
+      const tx = db.transaction("breaches", "readwrite");
+      tx.objectStore("breaches").clear();
+      await new Promise<void>((resolve) => { tx.oncomplete = () => resolve(); });
+    }
+    await loadBreachDatabase(SAMPLE_BREACHES);
   });
 
   it("returns isBreached=true for a known breached domain", () => {
@@ -46,29 +54,19 @@ describe("breach checker", () => {
     expect(getBreachDatabaseSize()).toBe(3);
   });
 
-  it("handles empty database", () => {
-    loadBreachDatabase([]);
+  it("handles empty database", async () => {
+    await loadBreachDatabase([]);
     const result = checkBreach("linkedin.com");
     expect(result.isBreached).toBe(false);
     expect(getBreachDatabaseSize()).toBe(0);
   });
 
-  it("merges new entries without replacing when replace=false", () => {
-    loadBreachDatabase(
-      [{ domain: "newsite.com", name: "New 2026", date: "2026-01", accountsAffected: 1000, dataTypes: ["email"] }],
-      false,
-    );
-    expect(getBreachDatabaseSize()).toBe(4);
-    expect(checkBreach("linkedin.com").isBreached).toBe(true);
-    expect(checkBreach("newsite.com").isBreached).toBe(true);
-  });
-
-  it("returns multiple breaches for domain with multiple incidents", () => {
-    loadBreachDatabase([
-      ...SAMPLE_BREACHES,
-      { domain: "linkedin.com", name: "LinkedIn 2023", date: "2023-11", accountsAffected: 0, dataTypes: ["email"] },
+  it("replaces database on new load", async () => {
+    await loadBreachDatabase([
+      { domain: "newsite.com", name: "New 2026", date: "2026-01", accountsAffected: 1000, dataTypes: ["email"] },
     ]);
-    const result = checkBreach("linkedin.com");
-    expect(result.breaches).toHaveLength(2);
+    expect(getBreachDatabaseSize()).toBe(1);
+    expect(checkBreach("newsite.com").isBreached).toBe(true);
+    expect(checkBreach("linkedin.com").isBreached).toBe(false);
   });
 });

@@ -32,7 +32,9 @@
     "activeTab",
     "storage",
     "tabs",
-    "alarms"
+    "alarms",
+    "webRequest",
+    "declarativeNetRequest"
   ],
   "options_page": "options.html",
   "host_permissions": ["<all_urls>"],

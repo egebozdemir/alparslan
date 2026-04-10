@@ -2,13 +2,20 @@
 import "@/utils/browser-polyfill";
 import { type Message, type ExtensionSettings, type ExtensionStats, type SiteReport, type ScanHistoryEntry, DEFAULT_SETTINGS, DEFAULT_STATS, MAX_HISTORY_ENTRIES } from "@/utils/types";
 import type { PageAnalysisResult } from "@/detector/page-analyzer";
-import { checkUrl, loadBlocklist, extractDomain } from "@/detector/url-checker";
+import { checkUrl, checkUrlConfirmed, extractDomain } from "@/detector/url-checker";
 import { fetchRemoteBlocklist, submitReport, scheduleListUpdates } from "@/blocklist/updater";
-import { checkBreach, loadBreachDatabase as loadBreachDB } from "@/breach/checker";
+import { initUsomBlocklist, scheduleUsomUpdates } from "@/blocklist/usom-updater";
+import { initWhitelist, scheduleWhitelistUpdates, getDynamicWhitelistSize } from "@/blocklist/whitelist-updater";
+import { checkBreach, loadBreachDatabase as loadBreachDB, initBreachCache } from "@/breach/checker";
 import { fetchRemoteBreachDatabase } from "@/breach/updater";
-import { collectCurrentWeekMetrics, collectPreviousWeekMetrics, recordPageProtocol, recordThreatVisit } from "@/dashboard/metrics-collector";
+import { collectCurrentWeekMetrics, collectPreviousWeekMetrics, recordPageProtocol, recordThreatVisit, recordTrackerBlocked } from "@/dashboard/metrics-collector";
 import { calculateScore } from "@/dashboard/score-calculator";
 import type { BreachEntry } from "@/breach/types";
+import { initListCache, isWhitelisted, addToWhitelist, removeFromWhitelist, addToBlacklist, getWhitelistDomains, getBlacklistSize } from "@/storage/list-cache";
+import type { BlacklistEntry } from "@/storage/types";
+import { startRequestMonitoring, stopRequestMonitoring, updateMonitoringSettings, getMonitoringStats, getTabMonitoringStats, clearTabStats } from "@/network/request-monitor";
+import { setTtlMinutes } from "@/network/url-check-cache";
+import t from "@/i18n/tr";
 
 interface ExtensionState {
   enabled: boolean;
@@ -40,52 +47,182 @@ function addHistoryEntry(url: string, level: string, score: number): void {
   if (state.history.length > MAX_HISTORY_ENTRIES) {
     state.history = state.history.slice(0, MAX_HISTORY_ENTRIES);
   }
-  chrome.storage.sync.set({ history: state.history });
+  chrome.storage.local.set({ history: state.history });
 }
+
+// --- Service worker init (runs on every wake-up, not just install) ---
+// Debug timing state
+const initTimings: Record<string, number> = { _startedAt: Date.now() };
+
+// Init progress tracking — exposed to popup via GET_INIT_STATUS
+interface InitProgress {
+  ready: boolean;
+  step: string;
+  percent: number;
+  steps: { name: string; done: boolean; ms?: number }[];
+}
+
+const initProgress: InitProgress = {
+  ready: false,
+  step: t.init.starting,
+  percent: 0,
+  steps: [
+    { name: t.init.settings, done: false },
+    { name: t.init.blacklist, done: false },
+    { name: t.init.usom, done: false },
+    { name: t.init.whitelist, done: false },
+    { name: t.init.breachDb, done: false },
+  ],
+};
+
+function updateProgress(stepIndex: number, ms?: number): void {
+  initProgress.steps[stepIndex].done = true;
+  if (ms !== undefined) initProgress.steps[stepIndex].ms = ms;
+  const done = initProgress.steps.filter((s) => s.done).length;
+  initProgress.percent = Math.round((done / initProgress.steps.length) * 100);
+  initProgress.step = stepIndex < initProgress.steps.length - 1
+    ? initProgress.steps[stepIndex + 1].name + " " + t.init.loadingSuffix
+    : t.init.ready;
+}
+
+async function initServiceWorker(): Promise<void> {
+  const t0 = Date.now();
+
+  // Step 1: Load settings from sync storage
+  initProgress.step = t.init.settings + " " + t.init.loadingSuffix;
+  const [syncResult, localResult] = await Promise.all([
+    new Promise<Record<string, unknown>>((resolve) => {
+      chrome.storage.sync.get(["enabled", "settings", "stats", "reports"], (r) => resolve(r));
+    }),
+    new Promise<Record<string, unknown>>((resolve) => {
+      chrome.storage.local.get(["history"], (r) => resolve(r));
+    }),
+  ]);
+  initTimings.storageLoad = Date.now() - t0;
+  updateProgress(0, initTimings.storageLoad);
+
+  if (syncResult.enabled !== undefined) {
+    state.enabled = syncResult.enabled as boolean;
+  }
+  if (syncResult.settings) {
+    state.settings = { ...DEFAULT_SETTINGS, ...(syncResult.settings as ExtensionSettings) };
+  }
+  if (syncResult.stats) {
+    state.stats = { ...DEFAULT_STATS, ...(syncResult.stats as ExtensionStats) };
+  }
+  if (syncResult.reports) {
+    state.reports = syncResult.reports as SiteReport[];
+  }
+  // History is stored in local (no sync size limit)
+  if (localResult.history) {
+    state.history = localResult.history as ScanHistoryEntry[];
+  }
+
+  // Step 2: Init blacklist cache from IndexedDB
+  initProgress.step = t.init.blacklist + " " + t.init.loadingSuffix;
+  const t1 = Date.now();
+  await initListCache();
+  initTimings.cacheInit = Date.now() - t1;
+  updateProgress(1, initTimings.cacheInit);
+
+  // Steps 3-5: USOM + whitelist + breach (parallel)
+  initProgress.step = t.init.usom + " " + t.init.loadingSuffix;
+  const t2 = Date.now();
+
+  const [usomResult, wlResult, breachResult] = await Promise.allSettled([
+    initUsomBlocklist(),
+    initWhitelist(),
+    initBreachCache(),
+  ]);
+
+  const t2end = Date.now() - t2;
+  initTimings.usomWhitelistBreach = t2end;
+
+  updateProgress(2, t2end); // USOM
+  if (usomResult.status === "rejected") console.warn("[Alparslan] USOM init failed:", usomResult.reason);
+
+  updateProgress(3, t2end); // Whitelist
+  if (wlResult.status === "rejected") console.warn("[Alparslan] Whitelist init failed:", wlResult.reason);
+
+  updateProgress(4, t2end); // Breach
+  if (breachResult.status === "rejected") console.warn("[Alparslan] Breach init failed:", breachResult.reason);
+
+  // Set URL check cache TTL from settings
+  setTtlMinutes(state.settings.urlCacheTtlMinutes);
+
+  // Start network request monitoring if enabled
+  if (state.settings.networkMonitoringEnabled) {
+    startRequestMonitoring(state.settings);
+  }
+
+  initTimings.total = Date.now() - t0;
+  initProgress.ready = true;
+  initProgress.step = t.init.ready;
+  initProgress.percent = 100;
+  console.warn(`[Alparslan] Service worker initialized in ${initTimings.total}ms (storage: ${initTimings.storageLoad}ms, cache: ${initTimings.cacheInit}ms)`);
+
+  // Re-scan all open tabs now that lists are loaded
+  chrome.tabs.query({}, (tabs) => {
+    for (const tab of tabs) {
+      if (!tab.id || !tab.url || tab.url.startsWith("chrome") || tab.url.startsWith("about:")) continue;
+      const result = checkUrl(tab.url, state.settings.protectionLevel);
+      updateBadge(tab.id, result.level);
+      // Tell the content script to re-check
+      chrome.tabs.sendMessage(tab.id, { type: "RESCAN" }).catch(() => {});
+    }
+  });
+}
+
+initServiceWorker().catch((err) => {
+  console.warn("[Alparslan] Service worker init error:", err);
+});
 
 chrome.runtime.onInstalled.addListener(() => {
   console.warn("[Alparslan] Extension installed");
-  chrome.storage.sync.get(["enabled", "settings", "stats", "reports", "history"], (result) => {
-    if (result.enabled !== undefined) {
-      state.enabled = result.enabled as boolean;
-    }
-    if (result.settings) {
-      state.settings = { ...DEFAULT_SETTINGS, ...(result.settings as ExtensionSettings) };
-    }
-    if (result.stats) {
-      state.stats = { ...DEFAULT_STATS, ...(result.stats as ExtensionStats) };
-    }
-    if (result.reports) {
-      state.reports = result.reports as SiteReport[];
-    }
-    if (result.history) {
-      state.history = result.history as ScanHistoryEntry[];
-    }
-  });
 
-  // Load built-in blocklist, then schedule remote updates
+  // Clear any leftover DNR block rules from previous version
+  if (chrome.declarativeNetRequest?.getDynamicRules) {
+    chrome.declarativeNetRequest.getDynamicRules().then((rules) => {
+      const blockRuleIds = rules.filter((r) => r.id >= 1000).map((r) => r.id);
+      if (blockRuleIds.length > 0) {
+        chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: blockRuleIds });
+        console.warn(`[Alparslan] Cleared ${blockRuleIds.length} leftover DNR rules`);
+      }
+    }).catch(() => {});
+  }
+
+  // Load built-in blocklist into IndexedDB (migration handles existing data)
   fetch(chrome.runtime.getURL("lists/tr-phishing.json"))
     .then((r) => r.json())
-    .then((data: { domains: { domain: string }[] }) => {
-      loadBlocklist(data.domains.map((d) => d.domain));
-      console.warn(`[Alparslan] Loaded ${data.domains.length} blocked domains`);
+    .then((data: { domains: BlacklistEntry[] }) => {
+      const entries: BlacklistEntry[] = data.domains.map((d) => ({
+        domain: d.domain,
+        category: d.category || "other",
+        addedAt: d.addedAt || new Date().toISOString().split("T")[0],
+        source: d.source || "builtin",
+      }));
+      return addToBlacklist(entries);
+    })
+    .then(() => {
+      console.warn("[Alparslan] Built-in blocklist loaded into IndexedDB");
     })
     .catch(() => {
       console.warn("[Alparslan] Could not load blocklist");
     });
 
-  // Schedule periodic remote list updates
+  // Schedule periodic list updates (USOM + whitelist + remote blocklist)
+  scheduleUsomUpdates();
+  scheduleWhitelistUpdates();
   scheduleListUpdates();
-
-  // Try an immediate remote fetch (merges with built-in list)
   fetchRemoteBlocklist();
 
   // Load built-in breach database
   fetch(chrome.runtime.getURL("lists/breached-sites.json"))
     .then((r) => r.json())
     .then((data: { breaches: BreachEntry[] }) => {
-      loadBreachDB(data.breaches);
-      console.warn("[Alparslan] Loaded " + String(data.breaches.length) + " breach entries");
+      return loadBreachDB(data.breaches).then(() => {
+        console.warn("[Alparslan] Breach DB stored in IndexedDB: " + String(data.breaches.length) + " entries");
+      });
     })
     .catch(() => {
       console.warn("[Alparslan] Could not load breach database");
@@ -107,25 +244,28 @@ chrome.runtime.onMessage.addListener(
       state.stats.urlsChecked++;
       const url = message.url as string;
 
-      // Check whitelist — skip detection for whitelisted domains
+      // Check whitelist via IndexedDB-backed cache
       try {
         const hostname = new URL(url).hostname.toLowerCase();
-        if (state.settings.whitelist.some((w) => hostname === w || hostname.endsWith("." + w))) {
+        if (isWhitelisted(hostname)) {
           persistStats();
           addHistoryEntry(url, "SAFE", 0);
-          sendResponse({ level: "SAFE", score: 0, reasons: ["Beyaz listede"], url, checkedAt: Date.now() });
+          sendResponse({ level: "SAFE", score: 0, reasons: [t.reasons.whitelisted], url, checkedAt: Date.now() });
           return true;
         }
       } catch { /* invalid URL — let checkUrl handle it */ }
 
-      const result = checkUrl(message.url as string, state.settings.protectionLevel);
-      if (result.level === "DANGEROUS" || result.level === "SUSPICIOUS") {
-        state.stats.threatsBlocked++;
-        recordThreatVisit(result.level);
-      }
-      persistStats();
-      addHistoryEntry(url, result.level, result.score);
-      sendResponse(result);
+      // Use async confirmed check (verifies USOM Bloom filter hits against IDB)
+      (async () => {
+        const result = await checkUrlConfirmed(url, state.settings.protectionLevel);
+        if (result.level === "DANGEROUS" || result.level === "SUSPICIOUS") {
+          state.stats.threatsBlocked++;
+          recordThreatVisit(result.level);
+        }
+        persistStats();
+        addHistoryEntry(url, result.level, result.score);
+        sendResponse(result);
+      })();
       return true;
     }
 
@@ -147,8 +287,53 @@ chrome.runtime.onMessage.addListener(
     }
 
     if (message.type === "SETTINGS_UPDATED") {
-      state.settings = message.settings as ExtensionSettings;
+      const newSettings = message.settings as ExtensionSettings;
+      const oldSettings = state.settings;
+      state.settings = newSettings;
+
+      // Update URL cache TTL
+      setTtlMinutes(newSettings.urlCacheTtlMinutes);
+
+      // Start/stop network monitoring based on setting change
+      if (newSettings.networkMonitoringEnabled && !oldSettings.networkMonitoringEnabled) {
+        startRequestMonitoring(newSettings);
+      } else if (!newSettings.networkMonitoringEnabled && oldSettings.networkMonitoringEnabled) {
+        stopRequestMonitoring();
+      } else if (newSettings.networkMonitoringEnabled) {
+        // Monitoring already running — propagate settings changes (blocking toggle, etc.)
+        updateMonitoringSettings(newSettings);
+      }
+
       sendResponse({ ok: true });
+      return true;
+    }
+
+    if (message.type === "ADD_TO_WHITELIST") {
+      const domain = message.domain as string;
+      addToWhitelist(domain).catch((err) => console.warn("[Alparslan] Whitelist add error:", err));
+      sendResponse({ ok: true });
+      return true;
+    }
+
+    if (message.type === "REMOVE_FROM_WHITELIST") {
+      const domain = message.domain as string;
+      removeFromWhitelist(domain).catch((err) => console.warn("[Alparslan] Whitelist remove error:", err));
+      sendResponse({ ok: true });
+      return true;
+    }
+
+    if (message.type === "GET_LIST_STATS") {
+      const tabId = message.tabId as number | undefined;
+      const monitoring = getMonitoringStats();
+      const tabData = tabId ? getTabMonitoringStats(tabId) : null;
+      sendResponse({
+        whitelistSize: getWhitelistDomains().length,
+        blacklistSize: getBlacklistSize(),
+        dynamicWhitelistSize: getDynamicWhitelistSize(),
+        settings: state.settings,
+        ...monitoring,
+        tab: tabData,
+      });
       return true;
     }
 
@@ -160,6 +345,7 @@ chrome.runtime.onMessage.addListener(
     if (message.type === "TRACKER_BLOCKED") {
       state.stats.trackersBlocked++;
       persistStats();
+      recordTrackerBlocked();
       sendResponse({ ok: true });
       return true;
     }
@@ -203,7 +389,7 @@ chrome.runtime.onMessage.addListener(
 
     if (message.type === "CLEAR_HISTORY") {
       state.history = [];
-      chrome.storage.sync.set({ history: [] });
+      chrome.storage.local.set({ history: [] });
       sendResponse({ ok: true });
       return true;
     }
@@ -256,6 +442,22 @@ chrome.runtime.onMessage.addListener(
       return true;
     }
 
+    if (message.type === "GET_INIT_STATUS") {
+      sendResponse(initProgress);
+      return true;
+    }
+
+    if (message.type === "GET_DEBUG_INFO") {
+      sendResponse({
+        initTimings,
+        blacklistSize: getBlacklistSize(),
+        whitelistSize: getWhitelistDomains().length,
+        monitoring: getMonitoringStats(),
+        uptime: Date.now() - (initTimings._startedAt || Date.now()),
+      });
+      return true;
+    }
+
     return false;
   },
 );
@@ -277,20 +479,14 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, _tab) => {
   if (changeInfo.url && state.enabled) {
     const result = checkUrl(changeInfo.url, state.settings.protectionLevel);
     recordPageProtocol(changeInfo.url);
-
     updateBadge(tabId, result.level);
-
-    if (result.level === "DANGEROUS" || result.level === "SUSPICIOUS") {
-      chrome.tabs
-        .sendMessage(tabId, {
-          type: "SHOW_WARNING",
-          level: result.level,
-          reason: result.reasons.join(", "),
-          score: result.score,
-        })
-        .catch(() => {});
-    }
+    // DOM warning is handled by content script itself (CHECK_URL on load)
   }
+});
+
+// Clean up tab stats when tabs are closed
+chrome.tabs.onRemoved.addListener((tabId) => {
+  clearTabStats(tabId);
 });
 
 export { state };

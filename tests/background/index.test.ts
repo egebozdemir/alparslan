@@ -1,3 +1,4 @@
+import "fake-indexeddb/auto";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Capture listener callbacks
@@ -48,12 +49,17 @@ Object.defineProperty(globalThis, "chrome", {
           onUpdatedCallback = cb;
         },
       },
+      onRemoved: { addListener: vi.fn() },
       sendMessage: sendMessageMock,
     },
     storage: {
       sync: {
         get: storageGetMock,
         set: storageSetMock,
+      },
+      local: {
+        get: vi.fn((_keys: unknown, cb: (result: Record<string, unknown>) => void) => cb({})),
+        set: vi.fn((_items: unknown, cb?: () => void) => cb?.()),
       },
     },
     alarms: {
@@ -63,6 +69,16 @@ Object.defineProperty(globalThis, "chrome", {
     action: {
       setBadgeText: vi.fn(),
       setBadgeBackgroundColor: vi.fn(),
+    },
+    webRequest: {
+      onBeforeRequest: {
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+      },
+    },
+    declarativeNetRequest: {
+      updateDynamicRules: vi.fn().mockResolvedValue(undefined),
+      getDynamicRules: vi.fn().mockResolvedValue([]),
     },
   },
   writable: true,
@@ -95,7 +111,7 @@ describe("Background Service Worker", () => {
   });
 
   describe("CHECK_URL message", () => {
-    it("should respond with ThreatResult", () => {
+    it("should respond with ThreatResult", async () => {
       const sendResponse = vi.fn();
       const result = onMessageCallback(
         { type: "CHECK_URL", url: "https://example.com" },
@@ -104,6 +120,8 @@ describe("Background Service Worker", () => {
       );
 
       expect(result).toBe(true);
+      // checkUrlConfirmed is async — wait for it
+      await new Promise((resolve) => setTimeout(resolve, 100));
       expect(sendResponse).toHaveBeenCalledWith(
         expect.objectContaining({
           level: expect.any(String),
@@ -139,17 +157,13 @@ describe("Background Service Worker", () => {
   });
 
   describe("tabs.onUpdated", () => {
-    it("should send warning for dangerous URLs", () => {
+    it("should update badge for dangerous URLs", () => {
       // Use a typosquatting domain to trigger DANGEROUS
       onUpdatedCallback(1, { url: "https://isbenk.com.tr/login" }, {});
 
-      expect(sendMessageMock).toHaveBeenCalledWith(
-        1,
-        expect.objectContaining({
-          type: "SHOW_WARNING",
-          level: expect.any(String),
-        }),
-      );
+      // DOM warnings are now handled by content script (CHECK_URL on load)
+      // tabs.onUpdated only updates the badge
+      expect(chrome.action.setBadgeText).toHaveBeenCalled();
     });
 
     it("should not send message for safe URLs", () => {
@@ -212,14 +226,19 @@ describe("Background Service Worker", () => {
   });
 
   describe("CHECK_URL with whitelist", () => {
-    it("should mark whitelisted domains as SAFE", () => {
-      // First set whitelist
+    it("should mark whitelisted domains as SAFE", async () => {
+      // Wait for initServiceWorker() to complete (it runs on import)
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      // Use the ADD_TO_WHITELIST message to add via the background worker's own cache instance
       const sr1 = vi.fn();
       onMessageCallback(
-        { type: "SETTINGS_UPDATED", settings: { protectionLevel: "medium", notificationsEnabled: true, whitelist: ["example.com"] } },
+        { type: "ADD_TO_WHITELIST", domain: "example.com" },
         {},
         sr1,
       );
+      // Give async write-through a tick to complete
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       // Then check URL
       const sendResponse = vi.fn();
@@ -324,10 +343,11 @@ describe("Background Service Worker", () => {
   });
 
   describe("CHECK_URL adds history entry", () => {
-    it("should add a history entry on URL check", () => {
-      // Check a URL
+    it("should add a history entry on URL check", async () => {
+      // Check a URL (async due to checkUrlConfirmed)
       const sr1 = vi.fn();
       onMessageCallback({ type: "CHECK_URL", url: "https://test-history.com" }, {}, sr1);
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       // Get history
       const sr2 = vi.fn();
@@ -415,13 +435,21 @@ describe("Background Service Worker", () => {
   });
 
   describe("onInstalled", () => {
-    it("should load saved state and blocklist", () => {
+    it("should load blocklist into IndexedDB", () => {
       onInstalledCallback();
+      // onInstalled fetches the blocklist JSON
+      expect(fetchMock).toHaveBeenCalled();
+    });
+  });
+
+  describe("initServiceWorker", () => {
+    it("should load saved state from storage", () => {
+      // initServiceWorker is called automatically on import
+      // Settings/stats from sync, history from local
       expect(storageGetMock).toHaveBeenCalledWith(
-        ["enabled", "settings", "stats", "reports", "history"],
+        ["enabled", "settings", "stats", "reports"],
         expect.any(Function),
       );
-      expect(fetchMock).toHaveBeenCalled();
     });
   });
 });

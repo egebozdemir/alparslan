@@ -30,7 +30,7 @@ export async function fetchRemoteBreachDatabase(): Promise<number> {
 
     const entries: BreachEntry[] = data.breaches;
     if (entries.length > 0) {
-      loadBreachDatabase(entries, false);
+      await loadBreachDatabase(entries);
       console.warn("[Alparslan] Breach DB updated: " + String(entries.length) + " entries");
     }
 

@@ -1,6 +1,9 @@
 import { ThreatLevel, type ThreatResult, type ExtensionSettings } from "@/utils/types";
+import { isBlacklisted } from "@/storage/list-cache";
 import { usomBloomTest } from "@/blocklist/usom-updater";
 import { hasDomain } from "@/blocklist/indexeddb-store";
+import { isDynamicWhitelisted, isUgcDomain, getRiskyTld } from "@/blocklist/whitelist-updater";
+import t from "@/i18n/tr";
 
 // ─── PUNYCODE DECODER (RFC 3492) ─────────────────────────────────
 // Chrome converts IDN domains to punycode (е-devlet.com → xn--devlet-2of.com).
@@ -142,21 +145,7 @@ const TRUSTED_DOMAINS = new Set([
   "cloudflare.com",
 ]);
 
-let dangerousDomains: Set<string> = new Set();
-
-export function loadBlocklist(domains: string[], replace = false): void {
-  if (replace) {
-    dangerousDomains = new Set(domains.map((d) => d.toLowerCase()));
-  } else {
-    for (const d of domains) {
-      dangerousDomains.add(d.toLowerCase());
-    }
-  }
-}
-
-export function getBlocklistSize(): number {
-  return dangerousDomains.size;
-}
+export { getBlacklistSize as getBlocklistSize } from "@/storage/list-cache";
 
 export function extractDomain(url: string): string | null {
   try {
@@ -361,7 +350,7 @@ export function checkUrl(
     return {
       level: ThreatLevel.UNKNOWN,
       score: 0,
-      reasons: ["Gecersiz URL"],
+      reasons: [t.reasons.invalidUrl],
       url,
       checkedAt: now,
     };
@@ -371,18 +360,23 @@ export function checkUrl(
   const reasons: string[] = [];
   let score = 0;
 
-  // Check builtin blocklist (all levels)
-  if (dangerousDomains.has(domain) || dangerousDomains.has(rootDomain)) {
+  // Check blocklist via IndexedDB-backed in-memory cache (all levels)
+  if (isBlacklisted(domain) || isBlacklisted(rootDomain)) {
     score = 100;
-    reasons.push("Bilinen tehlikeli site");
+    reasons.push(t.reasons.knownDangerous);
     return { level: ThreatLevel.DANGEROUS, score, reasons, url, checkedAt: now };
   }
 
   // Check USOM Bloom filter (sync, fast — "no" is definitive)
   if (usomBloomTest(domain) || usomBloomTest(rootDomain)) {
     score = 100;
-    reasons.push("USOM tehdit listesinde");
+    reasons.push(t.reasons.usomListed);
     return { level: ThreatLevel.DANGEROUS, score, reasons, url, checkedAt: now };
+  }
+
+  // Dynamic whitelist — skip further heuristics for known-safe domains
+  if (isDynamicWhitelisted(rootDomain) && !isUgcDomain(domain)) {
+    return { level: ThreatLevel.SAFE, score: 0, reasons: [], url, checkedAt: now };
   }
 
   // Low protection: only blocklist check — skip further analysis
@@ -397,14 +391,14 @@ export function checkUrl(
   const typo = checkTyposquatting(domain);
   if (typo.isSuspicious) {
     const reasonLabels: Record<string, { score: number; text: string }> = {
-      "homoglyph": { score: 100, text: "sahte Unicode karakterler kullaniyor (tehlikeli)" },
-      "edit-distance": { score: 70, text: "benzer domain (olasi sahte site)" },
-      "tld-mismatch": { score: 60, text: "ayni isim farkli uzanti (olasi sahte site)" },
-      "contains-trusted-name": { score: 50, text: "guvenilir ismi iceriyor (olasi sahte site)" },
-      "subdomain-impersonation": { score: 65, text: "alt alan adinda guvenilir isim (olasi sahte site)" },
-      "subdomain-typosquat": { score: 55, text: "alt alan adinda benzer isim (olasi sahte site)" },
+      "homoglyph": { score: 100, text: t.reasons.homoglyph },
+      "edit-distance": { score: 70, text: t.reasons.editDistance },
+      "tld-mismatch": { score: 60, text: t.reasons.tldMismatch },
+      "contains-trusted-name": { score: 50, text: t.reasons.containsTrusted },
+      "subdomain-impersonation": { score: 65, text: t.reasons.subdomainImpersonation },
+      "subdomain-typosquat": { score: 55, text: t.reasons.subdomainTyposquat },
     };
-    const match = reasonLabels[typo.reason ?? ""] ?? { score: 70, text: "benzer domain" };
+    const match = reasonLabels[typo.reason ?? ""] ?? { score: 70, text: t.reasons.similarDomain };
     score += match.score;
     reasons.push(`${typo.similarTo} ile ${match.text}`);
   }
@@ -413,21 +407,28 @@ export function checkUrl(
   if (domain.includes("login") || domain.includes("secure") || domain.includes("verify")) {
     if (!TRUSTED_DOMAINS.has(rootDomain)) {
       score += 20;
-      reasons.push("Suppheli anahtar kelime iceriyor");
+      reasons.push(t.reasons.suspiciousKeyword);
     }
   }
 
   // Medium + High: IP-based URL check
   if (domain.match(/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/)) {
     score += 30;
-    reasons.push("IP adresi ile erisim");
+    reasons.push(t.reasons.ipAccess);
   }
 
   // Medium + High: excessive subdomain check
   const subdomainCount = domain.split(".").length;
   if (subdomainCount > 4) {
     score += 15;
-    reasons.push("Cok fazla alt alan adi");
+    reasons.push(t.reasons.excessiveSubdomains);
+  }
+
+  // Medium + High: risky TLD check
+  const riskyTld = getRiskyTld(domain);
+  if (riskyTld) {
+    score += 15;
+    reasons.push(t.reasons.riskyTld(riskyTld));
   }
 
   // High protection: lower thresholds for more aggressive detection
@@ -460,15 +461,14 @@ export async function checkUrlConfirmed(
   const result = checkUrl(url, protectionLevel);
 
   // If the sync check flagged it as USOM, confirm via IndexedDB
-  if (result.level === ThreatLevel.DANGEROUS && result.reasons.includes("USOM tehdit listesinde")) {
+  if (result.level === ThreatLevel.DANGEROUS && result.reasons.includes(t.reasons.usomListed)) {
     const domain = extractDomain(url);
     if (domain) {
       const rootDomain = extractRootDomain(domain);
       const confirmed = await hasDomain(domain) || await hasDomain(rootDomain);
       if (!confirmed) {
         // Bloom filter false positive — re-run without USOM flag
-        // Remove the USOM reason and recalculate
-        const filteredReasons = result.reasons.filter((r) => r !== "USOM tehdit listesinde");
+        const filteredReasons = result.reasons.filter((r) => r !== t.reasons.usomListed);
         return {
           ...result,
           level: filteredReasons.length > 0 ? result.level : ThreatLevel.UNKNOWN,

@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fetchRemoteBreachDatabase, getBreachApiUrl, setBreachApiUrl } from "@/breach/updater";
 
 vi.mock("@/breach/checker", () => ({
-  loadBreachDatabase: vi.fn(),
+  loadBreachDatabase: vi.fn().mockResolvedValue(undefined),
 }));
 
 import { loadBreachDatabase } from "@/breach/checker";
@@ -26,7 +26,7 @@ describe("breach updater", () => {
 
     const count = await fetchRemoteBreachDatabase();
     expect(count).toBe(1);
-    expect(loadBreachDatabase).toHaveBeenCalledWith(mockBreaches, false);
+    expect(loadBreachDatabase).toHaveBeenCalledWith(mockBreaches);
   });
 
   it("returns -1 on HTTP error", async () => {

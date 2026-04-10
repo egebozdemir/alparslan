@@ -1,6 +1,7 @@
 // Remote blocklist updater — fetches phishing list from API periodically
 import { type ApiConfig, DEFAULT_API_CONFIG } from "@/utils/types";
-import { loadBlocklist } from "@/detector/url-checker";
+import { addToBlacklist } from "@/storage/list-cache";
+import type { BlacklistEntry } from "@/storage/types";
 
 const ALARM_NAME = "alparslan-list-update";
 
@@ -15,42 +16,81 @@ export function getApiConfig(): ApiConfig {
 }
 
 /**
+ * Parse domains from response — supports plain text (one domain per line)
+ * and JSON formats ({ domains: [...] }).
+ */
+function parseDomains(text: string, contentType: string): string[] {
+  const domains: string[] = [];
+
+  // Try JSON first if content-type suggests it
+  if (contentType.includes("json")) {
+    try {
+      const data = JSON.parse(text);
+      if (Array.isArray(data.domains)) {
+        for (const entry of data.domains) {
+          if (typeof entry === "string") domains.push(entry.trim());
+          else if (entry?.domain) domains.push(entry.domain.trim());
+        }
+      }
+      return domains.filter((d) => d.length > 0);
+    } catch { /* fall through to plain text */ }
+  }
+
+  // Plain text: one domain per line, skip comments (#) and empty lines
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed && !trimmed.startsWith("#")) {
+      domains.push(trimmed);
+    }
+  }
+  return domains;
+}
+
+/**
  * Fetch remote blocklist and merge with built-in list.
+ * Supports plain text (one domain per line) and JSON formats.
  * Returns the number of domains loaded, or -1 on failure.
  */
 export async function fetchRemoteBlocklist(): Promise<number> {
+  const t0 = Date.now();
   try {
-    const response = await fetch(config.listUrl, {
-      headers: { Accept: "application/json" },
-    });
+    console.warn(`[Alparslan] Fetching blocklist from: ${config.listUrl}`);
+    const response = await fetch(config.listUrl);
+    const fetchMs = Date.now() - t0;
 
     if (!response.ok) {
-      console.warn(`[Alparslan] List update failed: HTTP ${response.status}`);
+      console.warn(`[Alparslan] List update failed: HTTP ${response.status} (${fetchMs}ms)`);
       return -1;
     }
 
-    const data = await response.json();
-    const domains: string[] = [];
+    const contentType = response.headers.get("content-type") || "";
+    const text = await response.text();
+    const downloadMs = Date.now() - t0;
+    const sizeKb = (text.length / 1024).toFixed(1);
+    console.warn(`[Alparslan] Blocklist downloaded: ${sizeKb}KB in ${downloadMs}ms (content-type: ${contentType})`);
 
-    // Support both { domains: [{domain: "..."}] } and { domains: ["..."] }
-    if (Array.isArray(data.domains)) {
-      for (const entry of data.domains) {
-        if (typeof entry === "string") {
-          domains.push(entry);
-        } else if (entry?.domain) {
-          domains.push(entry.domain);
-        }
-      }
-    }
+    const domains = parseDomains(text, contentType);
+    const parseMs = Date.now() - t0 - downloadMs;
 
     if (domains.length > 0) {
-      loadBlocklist(domains);
-      console.warn(`[Alparslan] Remote list updated: ${domains.length} domains`);
+      const today = new Date().toISOString().split("T")[0];
+      const entries: BlacklistEntry[] = domains.map((d) => ({
+        domain: d,
+        category: "other" as const,
+        addedAt: today,
+        source: "remote",
+      }));
+      await addToBlacklist(entries);
+      const totalMs = Date.now() - t0;
+      console.warn(`[Alparslan] Remote list updated: ${domains.length} domains (download: ${downloadMs}ms, parse: ${parseMs}ms, save: ${totalMs - downloadMs - parseMs}ms, total: ${totalMs}ms)`);
+    } else {
+      console.warn(`[Alparslan] Remote list empty or could not parse (${text.length} bytes, content-type: ${contentType})`);
     }
 
     return domains.length;
   } catch (err) {
-    console.warn("[Alparslan] List update error:", err);
+    const elapsed = Date.now() - t0;
+    console.warn(`[Alparslan] List update error after ${elapsed}ms:`, err);
     return -1;
   }
 }

@@ -9,19 +9,29 @@
  * 5. Unicode homoglyph normalization
  * 6. Separator stripping (hyphens, dots)
  */
+import "fake-indexeddb/auto";
 import { describe, it, expect, beforeEach } from "vitest";
 import {
   levenshteinDistance,
   checkTyposquatting,
   checkUrl,
-  loadBlocklist,
   normalizeHomoglyphs,
   decodePunycodeDomain,
 } from "@/detector/url-checker";
 import { ThreatLevel } from "@/utils/types";
+import { initListCache, resetListCache } from "@/storage/list-cache";
+import { getDb } from "@/storage/idb";
+import t from "@/i18n/tr";
 
-beforeEach(() => {
-  loadBlocklist([], true);
+beforeEach(async () => {
+  resetListCache();
+  const db = await getDb();
+  const tx = db.transaction(["whitelist", "blacklist", "metadata"], "readwrite");
+  tx.objectStore("whitelist").clear();
+  tx.objectStore("blacklist").clear();
+  tx.objectStore("metadata").clear();
+  await new Promise<void>((resolve) => { tx.oncomplete = () => resolve(); });
+  await initListCache();
 });
 
 // ─── DAMERAU-LEVENSHTEIN (IMPROVEMENT #4) ─────────────────────────
@@ -382,7 +392,7 @@ describe("Full URL scoring with improved detection", () => {
     const result = checkUrl("https://turkiye.com", "medium");
     expect(result.score).toBe(60);
     expect(result.level).toBe(ThreatLevel.SUSPICIOUS);
-    expect(result.reasons[0]).toContain("farkli uzanti");
+    expect(result.reasons[0]).toContain(t.reasons.tldMismatch);
   });
 
   it("TLD mismatch scores 60 → DANGEROUS at high (threshold 50)", () => {

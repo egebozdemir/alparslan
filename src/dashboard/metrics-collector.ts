@@ -65,6 +65,7 @@ export async function recordPageProtocol(url: string): Promise<void> {
 
   await updateMetrics((m) => ({
     ...m,
+    urlsChecked: m.urlsChecked + 1,
     httpsCount: m.httpsCount + (isHttps ? 1 : 0),
     httpCount: m.httpCount + (isHttp ? 1 : 0),
   }));
@@ -75,7 +76,15 @@ export async function recordThreatVisit(level: string): Promise<void> {
 
   await updateMetrics((m) => ({
     ...m,
+    threatsBlocked: m.threatsBlocked + 1,
     dangerousSitesVisited: m.dangerousSitesVisited + (level === "DANGEROUS" ? 1 : 0),
     suspiciousSitesVisited: m.suspiciousSitesVisited + (level === "SUSPICIOUS" ? 1 : 0),
+  }));
+}
+
+export async function recordTrackerBlocked(): Promise<void> {
+  await updateMetrics((m) => ({
+    ...m,
+    trackersBlocked: m.trackersBlocked + 1,
   }));
 }
