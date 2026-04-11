@@ -95,41 +95,21 @@ export async function fetchRemoteBlocklist(): Promise<number> {
   }
 }
 
-/**
- * Submit a site report to the remote API.
- * Fire-and-forget — does not block the caller.
- */
-export async function submitReport(report: {
-  domain: string;
-  url: string;
-  reportType: "dangerous" | "safe";
-  description: string;
-}): Promise<boolean> {
-  try {
-    const response = await fetch(config.reportUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(report),
-    });
-    return response.ok;
-  } catch {
-    console.warn("[Alparslan] Report submission failed");
-    return false;
-  }
-}
 
 /**
  * Schedule periodic list updates using chrome.alarms.
  */
 export function scheduleListUpdates(): void {
-  chrome.alarms.create(ALARM_NAME, {
-    delayInMinutes: 1, // first update 1 min after install
-    periodInMinutes: config.updateIntervalMinutes,
-  });
-
-  chrome.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === ALARM_NAME) {
-      fetchRemoteBlocklist();
-    }
-  });
+  if (chrome.alarms) {
+    chrome.alarms.create(ALARM_NAME, {
+      delayInMinutes: 1,
+      periodInMinutes: config.updateIntervalMinutes,
+    });
+    chrome.alarms.onAlarm.addListener((alarm) => {
+      if (alarm.name === ALARM_NAME) fetchRemoteBlocklist();
+    });
+  } else {
+    setTimeout(() => fetchRemoteBlocklist(), 60_000);
+    setInterval(() => fetchRemoteBlocklist(), config.updateIntervalMinutes * 60_000);
+  }
 }
