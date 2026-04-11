@@ -107,11 +107,11 @@ export default function App() {
       if (tabId) {
         chrome.runtime.sendMessage({ type: "GET_LIST_STATS", tabId }, (response: unknown) => {
           const r = response as {
-            blacklistSize?: number; whitelistSize?: number;
+            blacklistSize?: number; whitelistSize?: number; dynamicWhitelistSize?: number;
             tab?: { requestsChecked: number; threatsDetected: number; requestsBlocked: number; domains: string[]; threats: Array<{ domain: string; level: string; timestamp: number }> };
           } | null;
           if (r) {
-            setListStats({ blacklistSize: r.blacklistSize ?? 0, whitelistSize: r.whitelistSize ?? 0 });
+            setListStats({ blacklistSize: r.blacklistSize ?? 0, whitelistSize: (r.whitelistSize ?? 0) + (r.dynamicWhitelistSize ?? 0) });
             if (r.tab) setTabStats(r.tab);
           }
         });
