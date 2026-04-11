@@ -3,7 +3,7 @@
 
 import { bulkInsertDomains, getAllDomains, getDomainCount, clearBySource } from "./indexeddb-store";
 import {
-  createBloomFilter,
+  createBloomFilterAsync,
   bloomFilterTest,
   serializeBloomFilter,
   deserializeBloomFilter,
@@ -46,7 +46,7 @@ async function rebuildBloomFromIDB(): Promise<void> {
   const domains = await getAllDomains();
   if (domains.length === 0) return;
 
-  bloomFilter = createBloomFilter(domains);
+  bloomFilter = await createBloomFilterAsync(domains);
   console.warn(`[Alparslan] USOM Bloom filter built: ${domains.length} domains, ${(bloomFilter.bits.byteLength / 1024).toFixed(0)}KB`);
 
   try {
@@ -111,17 +111,34 @@ async function fetchRemoteList(): Promise<string[]> {
 }
 
 async function storeAndBuildBloom(domains: string[], version: Partial<UsomVersion>): Promise<void> {
-  await clearBySource("usom");
-  const inserted = await bulkInsertDomains(domains, "usom");
-  console.warn(`[Alparslan] USOM list stored in IndexedDB: ${inserted} domains`);
-  await rebuildBloomFromIDB();
+  // Build Bloom filter FIRST — makes USOM checks available immediately
+  bloomFilter = await createBloomFilterAsync(domains);
+  console.warn(`[Alparslan] USOM Bloom filter built: ${domains.length} domains, ${(bloomFilter.bits.byteLength / 1024).toFixed(0)}KB`);
+
+  // Cache serialized Bloom filter for fast next startup
+  try {
+    const serialized = serializeBloomFilter(bloomFilter);
+    const base64 = arrayBufferToBase64(serialized);
+    await chrome.storage.local.set({ [STORAGE_KEY_BLOOM]: base64 });
+  } catch (err) {
+    console.warn("[Alparslan] Could not cache Bloom filter:", err);
+  }
+
+  // Save version info (small, fast)
   await chrome.storage.local.set({
     [STORAGE_KEY_VERSION]: {
       hash: version.hash ?? "",
       date: version.updatedAt ?? new Date().toISOString(),
-      count: inserted,
+      count: domains.length,
     },
   });
+
+  // IDB writes — fire-and-forget, don't block init
+  // Bloom filter handles lookups; IDB is only for hasDomain() confirmations
+  clearBySource("usom")
+    .then(() => bulkInsertDomains(domains, "usom"))
+    .then((inserted) => console.warn(`[Alparslan] USOM list stored in IndexedDB: ${inserted} domains`))
+    .catch((err) => console.warn("[Alparslan] USOM IDB store error:", err));
 }
 
 export async function initUsomBlocklist(): Promise<void> {
@@ -150,16 +167,19 @@ export async function initUsomBlocklist(): Promise<void> {
 }
 
 export function scheduleUsomUpdates(): void {
-  chrome.alarms.create(USOM_ALARM_NAME, {
-    delayInMinutes: 5,
-    periodInMinutes: UPDATE_INTERVAL_MINUTES,
-  });
-
-  chrome.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === USOM_ALARM_NAME) {
-      refreshUsomList();
-    }
-  });
+  if (chrome.alarms) {
+    chrome.alarms.create(USOM_ALARM_NAME, {
+      delayInMinutes: 5,
+      periodInMinutes: UPDATE_INTERVAL_MINUTES,
+    });
+    chrome.alarms.onAlarm.addListener((alarm) => {
+      if (alarm.name === USOM_ALARM_NAME) refreshUsomList();
+    });
+  } else {
+    // Safari: no alarms API — use setInterval fallback
+    setTimeout(() => refreshUsomList(), 5 * 60_000);
+    setInterval(() => refreshUsomList(), UPDATE_INTERVAL_MINUTES * 60_000);
+  }
 }
 
 async function refreshUsomList(): Promise<void> {
