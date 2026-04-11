@@ -50,7 +50,7 @@ function createWarningBanner(level: string, reason: string): void {
         box-shadow: 0 2px 8px rgba(0,0,0,0.3);
         animation: slideDown 0.3s ease-out;
       }
-      .banner-content { display: flex; align-items: center; gap: 12px; flex: 1; }
+      .banner-content { display: contents; align-items: center; gap: 12px; flex: 1; }
       .banner-icon { font-size: 20px; }
       .banner-title { font-weight: 700; }
       .banner-reason { font-size: 12px; opacity: 0.9; margin-top: 2px; }
@@ -167,16 +167,15 @@ function runPageAnalysis(): void {
     if (currentUrl.startsWith("chrome") || currentUrl.startsWith("about:") || currentUrl.startsWith("moz-extension")) return;
 
     // Ask background to check this URL — content script is ready now
+    // Background waits for init (lists loaded) before responding, so we always get a correct result.
+    // Response includes showDomWarnings to avoid a separate GET_SETTINGS round-trip.
     chrome.runtime.sendMessage(
       { type: "CHECK_URL", url: currentUrl },
-      (response: { level?: string; reasons?: string[]; score?: number } | null) => {
+      (response: { level?: string; reasons?: string[]; score?: number; showDomWarnings?: boolean } | null) => {
         if (response && (response.level === "DANGEROUS" || response.level === "SUSPICIOUS")) {
-          // Check if DOM warnings are enabled
-          chrome.runtime.sendMessage({ type: "GET_SETTINGS" }, (settingsRes: { settings?: { showDomWarnings?: boolean } } | null) => {
-            if (settingsRes?.settings?.showDomWarnings !== false) {
-              createWarningBanner(response.level!, (response.reasons || []).join(", "));
-            }
-          });
+          if (response.showDomWarnings !== false) {
+            createWarningBanner(response.level!, (response.reasons || []).join(", "));
+          }
         }
       },
     );
@@ -230,5 +229,3 @@ if (document.readyState === "complete") {
 } else {
   window.addEventListener("load", () => setTimeout(runPageAnalysis, 500));
 }
-
-export {};
