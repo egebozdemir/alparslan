@@ -179,14 +179,16 @@ async function refreshWhitelist(): Promise<void> {
 }
 
 export function scheduleWhitelistUpdates(): void {
-  chrome.alarms.create(ALARM_NAME, {
-    delayInMinutes: 5,
-    periodInMinutes: UPDATE_INTERVAL_MINUTES,
-  });
-
-  chrome.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === ALARM_NAME) {
-      refreshWhitelist();
-    }
-  });
+  if (chrome.alarms) {
+    chrome.alarms.create(ALARM_NAME, {
+      delayInMinutes: 5,
+      periodInMinutes: UPDATE_INTERVAL_MINUTES,
+    });
+    chrome.alarms.onAlarm.addListener((alarm) => {
+      if (alarm.name === ALARM_NAME) refreshWhitelist();
+    });
+  } else {
+    setTimeout(() => refreshWhitelist(), 5 * 60_000);
+    setInterval(() => refreshWhitelist(), UPDATE_INTERVAL_MINUTES * 60_000);
+  }
 }

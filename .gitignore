@@ -1,6 +1,7 @@
 node_modules/
 dist/
 dist-firefox/
+dist-safari/
 *.zip
 *.log
 .DS_Store
