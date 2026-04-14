@@ -97,6 +97,7 @@ const TRUSTED_DOMAINS = new Set([
   "isbank.com.tr",
   "garanti.com.tr",
   "akbank.com.tr",
+  "akbank.com",
   "yapikredi.com.tr",
   "halkbank.com.tr",
   "vakifbank.com.tr",
@@ -141,6 +142,7 @@ const TRUSTED_DOMAINS = new Set([
   // Global — other major
   "netflix.com",
   "spotify.com",
+  "shopify.com",
   "paypal.com",
   "cloudflare.com",
 ]);
@@ -295,8 +297,12 @@ export function checkTyposquatting(
     }
 
     // Check 2: Damerau-Levenshtein distance ≤ 2 (classic typosquatting)
+    // Distance 2 with equal lengths = two substitutions — usually unrelated
+    // words (akbank/isbank, shopify/spotify), not typos. Require a length
+    // difference so distance-2 only catches insert/delete-based typos.
     const distance = levenshteinDistance(strippedName, strippedTrustedName);
-    if (distance > 0 && distance <= 2) {
+    const lenDiff = Math.abs(strippedName.length - strippedTrustedName.length);
+    if (distance === 1 || (distance === 2 && lenDiff >= 1)) {
       return {
         isSuspicious: true,
         similarTo: trusted,
