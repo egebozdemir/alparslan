@@ -10,7 +10,7 @@ import {
   type BloomFilterData,
 } from "./bloom-filter";
 import { logger } from "@/utils/logger";
-import { fetchTextWithLimit, FETCH_LIMITS } from "@/utils/safe-fetch";
+import { fetchTextWithLimit, FETCH_LIMITS, sha256Hex } from "@/utils/safe-fetch";
 
 const USOM_ALARM_NAME = "alparslan-usom-update";
 const STORAGE_KEY_VERSION = "usom-version";
@@ -24,6 +24,12 @@ const USOM_VERSION_URL = `${GITHUB_BASE}/version.json`;
 interface UsomVersion {
   version: string;
   hash: string;
+  /**
+   * Optional SHA-256 hex digest of the raw list body. Upstream publishes
+   * a short version tag in `hash`; when it adds a full content hash we
+   * verify the downloaded body against it.
+   */
+  sha256?: string;
   count: number;
   updatedAt: string;
 }
@@ -103,14 +109,49 @@ async function checkRemoteVersion(): Promise<{ hasUpdate: boolean; remote: UsomV
   }
 }
 
-async function fetchRemoteList(): Promise<string[]> {
+async function fetchRemoteList(): Promise<{ domains: string[]; sha256: string }> {
   const { text } = await fetchTextWithLimit(USOM_LIST_URL, {
     maxBytes: FETCH_LIMITS.usomBlocklistTxt,
   });
-  return parseDomainList(text);
+  const sha256 = await sha256Hex(text);
+  return { domains: parseDomainList(text), sha256 };
 }
 
-async function storeAndBuildBloom(domains: string[], version: Partial<UsomVersion>): Promise<void> {
+/**
+ * Reject the download if integrity can be confidently falsified.
+ * Three layers:
+ *  1. Upstream-published full SHA-256 (`version.sha256`) — strict match.
+ *  2. Locally-stored SHA-256 from a previous fetch of the same version
+ *     tag — if `version.hash` is unchanged but the content hash moved,
+ *     that's mid-flight tampering and we reject.
+ *  3. Otherwise accept (no authoritative hash to compare against).
+ */
+async function verifyIntegrity(
+  computed: string,
+  version: Partial<UsomVersion>,
+): Promise<void> {
+  if (version.sha256 && version.sha256 !== computed) {
+    throw new Error(
+      `USOM integrity failure: published sha256=${version.sha256} computed=${computed}`,
+    );
+  }
+  const stored = await chrome.storage.local.get(STORAGE_KEY_VERSION);
+  const local = stored[STORAGE_KEY_VERSION] as { hash?: string; sha256?: string } | undefined;
+  if (
+    local?.hash && local.hash === version.hash &&
+    local.sha256 && local.sha256 !== computed
+  ) {
+    throw new Error(
+      `USOM integrity drift: version tag ${version.hash} unchanged but content sha256 moved ${local.sha256} → ${computed}`,
+    );
+  }
+}
+
+async function storeAndBuildBloom(
+  domains: string[],
+  version: Partial<UsomVersion>,
+  sha256: string,
+): Promise<void> {
   // Build Bloom filter FIRST — makes USOM checks available immediately
   bloomFilter = await createBloomFilterAsync(domains);
   logger.debug(`USOM Bloom filter built: ${domains.length} domains, ${(bloomFilter.bits.byteLength / 1024).toFixed(0)}KB`);
@@ -124,10 +165,12 @@ async function storeAndBuildBloom(domains: string[], version: Partial<UsomVersio
     logger.warn("Could not cache Bloom filter:", err);
   }
 
-  // Save version info (small, fast)
+  // Save version info (small, fast). Content sha256 is retained for
+  // drift-detection on subsequent fetches.
   await chrome.storage.local.set({
     [STORAGE_KEY_VERSION]: {
       hash: version.hash ?? "",
+      sha256,
       date: version.updatedAt ?? new Date().toISOString(),
       count: domains.length,
     },
@@ -157,9 +200,10 @@ export async function initUsomBlocklist(): Promise<void> {
   try {
     logger.debug("Fetching USOM list from GitHub...");
     const t0 = Date.now();
-    const domains = await fetchRemoteList();
+    const { domains, sha256 } = await fetchRemoteList();
     const { remote } = await checkRemoteVersion();
-    await storeAndBuildBloom(domains, remote ?? {});
+    await verifyIntegrity(sha256, remote ?? {});
+    await storeAndBuildBloom(domains, remote ?? {}, sha256);
     logger.debug(`USOM init complete: ${domains.length} domains in ${Date.now() - t0}ms`);
   } catch (err) {
     logger.warn("USOM init error:", err);
@@ -191,9 +235,10 @@ async function refreshUsomList(): Promise<void> {
     }
 
     logger.debug("USOM list update available, downloading...");
-    const domains = await fetchRemoteList();
+    const { domains, sha256 } = await fetchRemoteList();
     if (domains.length > 0) {
-      await storeAndBuildBloom(domains, remote ?? {});
+      await verifyIntegrity(sha256, remote ?? {});
+      await storeAndBuildBloom(domains, remote ?? {}, sha256);
       logger.debug(`USOM list refreshed: ${domains.length} domains`);
     }
   } catch (err) {

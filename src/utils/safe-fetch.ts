@@ -95,6 +95,26 @@ export async function fetchTextWithLimit(
   }
 }
 
+/**
+ * SHA-256 hex digest of a UTF-8 string.
+ *
+ * Used for content integrity verification on remote list payloads.
+ * Upstream version.json carries a short version tag in `hash`; when it
+ * adds a full `sha256` field we verify against it. Locally computed
+ * digests are also stored so repeat fetches of the same version tag
+ * can be compared across service-worker wakes.
+ */
+export async function sha256Hex(input: string): Promise<string> {
+  const bytes = new TextEncoder().encode(input);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const view = new Uint8Array(digest);
+  let out = "";
+  for (let i = 0; i < view.length; i++) {
+    out += view[i].toString(16).padStart(2, "0");
+  }
+  return out;
+}
+
 // Convenience wrappers around the common size tiers.
 export const FETCH_LIMITS = {
   versionJson: 64 * 1024,        // 64 KB — tiny metadata
