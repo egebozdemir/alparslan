@@ -248,8 +248,34 @@ chrome.runtime.onInstalled.addListener(() => {
 
 });
 
+// Message types that mutate extension state. They are only accepted from
+// extension-own pages (popup, options). Content scripts should never be
+// able to flip protection level, toggle the kill-switch, or mutate the
+// whitelist on the user's behalf. A content script has `sender.tab` set;
+// an extension page does not.
+const PRIVILEGED_MESSAGE_TYPES = new Set([
+  "SET_ENABLED",
+  "SETTINGS_UPDATED",
+  "ADD_TO_WHITELIST",
+  "REMOVE_FROM_WHITELIST",
+  "CLEAR_HISTORY",
+]);
+
+function isFromExtensionPage(sender: chrome.runtime.MessageSender): boolean {
+  return sender.id === chrome.runtime.id && sender.tab === undefined;
+}
+
 chrome.runtime.onMessage.addListener(
-  (message: Message, _sender, sendResponse) => {
+  (message: Message, sender, sendResponse) => {
+    if (PRIVILEGED_MESSAGE_TYPES.has(message.type) && !isFromExtensionPage(sender)) {
+      // Don't include sender.url in prod logger.warn — it's a page URL
+      // and the logger contract keeps PII out of end-user consoles.
+      logger.warn("Rejected privileged message:", message.type);
+      logger.debug("Rejected sender url:", sender.url);
+      sendResponse({ ok: false, reason: "unauthorized" });
+      return true;
+    }
+
     if (message.type === "PING") {
       sendResponse({ type: "PONG", timestamp: Date.now() });
       return true;
