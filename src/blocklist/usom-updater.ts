@@ -10,6 +10,7 @@ import {
   type BloomFilterData,
 } from "./bloom-filter";
 import { logger } from "@/utils/logger";
+import { fetchTextWithLimit, FETCH_LIMITS } from "@/utils/safe-fetch";
 
 const USOM_ALARM_NAME = "alparslan-usom-update";
 const STORAGE_KEY_VERSION = "usom-version";
@@ -83,13 +84,13 @@ function parseDomainList(text: string): string[] {
 
 async function checkRemoteVersion(): Promise<{ hasUpdate: boolean; remote: UsomVersion | null }> {
   try {
-    const response = await fetch(USOM_VERSION_URL, {
+    const { text } = await fetchTextWithLimit(USOM_VERSION_URL, {
+      maxBytes: FETCH_LIMITS.versionJson,
       headers: { Accept: "application/json" },
       cache: "no-cache",
     });
-    if (!response.ok) return { hasUpdate: false, remote: null };
 
-    const remote: UsomVersion = await response.json();
+    const remote: UsomVersion = JSON.parse(text);
     const stored = await chrome.storage.local.get(STORAGE_KEY_VERSION);
     const local = stored[STORAGE_KEY_VERSION] as { hash?: string } | undefined;
 
@@ -103,11 +104,9 @@ async function checkRemoteVersion(): Promise<{ hasUpdate: boolean; remote: UsomV
 }
 
 async function fetchRemoteList(): Promise<string[]> {
-  const response = await fetch(USOM_LIST_URL);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch USOM list from GitHub: ${response.status}`);
-  }
-  const text = await response.text();
+  const { text } = await fetchTextWithLimit(USOM_LIST_URL, {
+    maxBytes: FETCH_LIMITS.usomBlocklistTxt,
+  });
   return parseDomainList(text);
 }
 

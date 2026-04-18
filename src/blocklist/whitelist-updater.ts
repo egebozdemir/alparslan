@@ -12,6 +12,7 @@ import {
   setMetadata,
 } from "@/storage/idb";
 import { logger } from "@/utils/logger";
+import { fetchTextWithLimit, FETCH_LIMITS } from "@/utils/safe-fetch";
 
 const GITHUB_BASE = "https://raw.githubusercontent.com/AsabiAlgo/blocklists/main";
 const WHITELIST_URL = `${GITHUB_BASE}/whitelist.txt`;
@@ -82,24 +83,19 @@ async function loadFromIdb(): Promise<boolean> {
   }
 }
 
-async function fetchList(url: string): Promise<string[]> {
-  const response = await fetch(url, { cache: "no-cache" });
-  if (!response.ok) {
-    throw new Error(`Failed to fetch ${url}: ${response.status}`);
-  }
-  const text = await response.text();
+async function fetchList(url: string, maxBytes: number): Promise<string[]> {
+  const { text } = await fetchTextWithLimit(url, { maxBytes, cache: "no-cache" });
   return parseDomainList(text);
 }
 
 async function hasRemoteUpdate(): Promise<boolean> {
   try {
-    const response = await fetch(VERSION_URL, {
+    const { text } = await fetchTextWithLimit(VERSION_URL, {
+      maxBytes: FETCH_LIMITS.versionJson,
       headers: { Accept: "application/json" },
       cache: "no-cache",
     });
-    if (!response.ok) return false;
-
-    const data = await response.json();
+    const data = JSON.parse(text);
     const remoteHash = data.whitelist?.hash as string | undefined;
     if (!remoteHash) return false;
 
@@ -115,9 +111,9 @@ async function fetchAndStore(): Promise<void> {
   const t0 = Date.now();
 
   const [wlDomains, ugcList, tldList] = await Promise.all([
-    fetchList(WHITELIST_URL),
-    fetchList(UGC_DOMAINS_URL).catch(() => [] as string[]),
-    fetchList(RISKY_TLDS_URL).catch(() => [] as string[]),
+    fetchList(WHITELIST_URL, FETCH_LIMITS.whitelistTxt),
+    fetchList(UGC_DOMAINS_URL, FETCH_LIMITS.ugcDomainsTxt).catch(() => [] as string[]),
+    fetchList(RISKY_TLDS_URL, FETCH_LIMITS.riskyTldsTxt).catch(() => [] as string[]),
   ]);
 
   // Store in IndexedDB
@@ -134,17 +130,16 @@ async function fetchAndStore(): Promise<void> {
 
   // Store version info
   try {
-    const response = await fetch(VERSION_URL, {
+    const { text } = await fetchTextWithLimit(VERSION_URL, {
+      maxBytes: FETCH_LIMITS.versionJson,
       headers: { Accept: "application/json" },
       cache: "no-cache",
     });
-    if (response.ok) {
-      const data = await response.json();
-      await setMetadata("whitelist-version", {
-        hash: data.whitelist?.hash ?? "",
-        updatedAt: new Date().toISOString(),
-      });
-    }
+    const data = JSON.parse(text);
+    await setMetadata("whitelist-version", {
+      hash: data.whitelist?.hash ?? "",
+      updatedAt: new Date().toISOString(),
+    });
   } catch {
     // version check is optional
   }
