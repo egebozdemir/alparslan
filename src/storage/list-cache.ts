@@ -25,10 +25,16 @@ export function isCacheReady(): boolean {
 export function isWhitelisted(domain: string): boolean {
   const d = domain.toLowerCase();
   if (whitelistSet.has(d)) return true;
-  // Check parent domain match (e.g. "sub.example.com" matches "example.com")
+  // Parent-domain match, capped at 3 labels. A whitelist entry must be
+  // a full host name with at least one dot — never a bare TLD or a
+  // compound public suffix. Stopping at `length - 2` leaves the last
+  // two parts intact (the effective TLD + SLD); stopping at `length - 3`
+  // would over-match. Candidates are whitelist entries with 3+ labels.
   const parts = d.split(".");
   for (let i = 1; i < parts.length - 1; i++) {
-    if (whitelistSet.has(parts.slice(i).join("."))) return true;
+    const candidate = parts.slice(i).join(".");
+    if (candidate.split(".").length < 2) break;
+    if (whitelistSet.has(candidate)) return true;
   }
   return false;
 }
