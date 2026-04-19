@@ -17,7 +17,9 @@ test.describe("Popup Navigation", () => {
 
   test("should default to Durum tab with stats visible", async ({ context, extensionId }) => {
     const popup = await openPopup(context, extensionId);
-    await expect(popup.getByText("Kontrol")).toBeVisible();
+    // "Kontrol" also appears inside "Kontrol ediliyor..." briefly during
+    // init; pin to the exact stat label.
+    await expect(popup.getByText("Kontrol", { exact: true })).toBeVisible();
     await expect(popup.getByText("Tehdit")).toBeVisible();
     await popup.close();
   });

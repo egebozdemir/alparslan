@@ -21,6 +21,37 @@ export const test = base.extend<{
         "--disable-gpu",
       ],
     });
+
+    // Stub remote list endpoints the SW init fetches on startup. Without this,
+    // every test pays 10-30 s to pull ~20 MB of USOM data from GitHub, and CI
+    // rate-limits after a handful of runs. Tests exercise UI flow and the
+    // detector's heuristic path, neither of which depends on the live USOM
+    // list — the in-memory bloom filter stays empty.
+    await context.route("**/AsabiAlgo/blocklists/**", (route) => {
+      const url = route.request().url();
+      if (url.endsWith("version.json")) {
+        return route.fulfill({
+          status: 200,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            version: "e2e-stub",
+            hash: "e2e-stub",
+            count: 0,
+            updatedAt: new Date().toISOString(),
+            whitelist: { hash: "e2e-stub", count: 0 },
+          }),
+        });
+      }
+      return route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/plain" },
+        body: "",
+      });
+    });
+    await context.route("**/cdn.jsdelivr.net/gh/AsabiAlgo/blocklists**", (route) =>
+      route.fulfill({ status: 200, headers: { "content-type": "text/plain" }, body: "" }),
+    );
+
     await use(context);
     await context.close();
   },
@@ -37,21 +68,22 @@ export const test = base.extend<{
     // SW's async init: popup opens in "loading" state, content-script
     // breach checks return empty, and assertions time out.
     //
-    // Flags are set by src/background/index.ts. 30 s ceiling because USOM
-    // fetch from GitHub is the slowest step and can take 10-15 s on CI.
+    // Flags are set by src/background/index.ts. 60 s ceiling is a safety
+    // margin — with the GitHub fetches stubbed above (context.route), init
+    // should complete in under a second.
     await serviceWorker.evaluate(async () => {
       interface E2EReadiness {
         swInitDone: boolean;
         blocklistLoaded: boolean;
         breachLoaded: boolean;
       }
-      const deadline = Date.now() + 30_000;
+      const deadline = Date.now() + 60_000;
       while (Date.now() < deadline) {
         const s = (globalThis as typeof globalThis & { __alparslanE2E?: E2EReadiness }).__alparslanE2E;
         if (s?.swInitDone && s?.blocklistLoaded && s?.breachLoaded) return;
         await new Promise((r) => setTimeout(r, 100));
       }
-      throw new Error("extension service worker did not become ready within 30 s");
+      throw new Error("extension service worker did not become ready within 60 s");
     });
 
     await use(extensionId);
