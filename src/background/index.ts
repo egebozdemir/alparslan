@@ -74,6 +74,21 @@ let initDone = false;
 let resolveInit: () => void;
 const initReady = new Promise<void>((resolve) => { resolveInit = resolve; });
 
+// Testing hook: readiness flags that e2e fixtures poll for before running
+// assertions. Flipped in-place as init steps finish. Negligible cost at
+// runtime; unused in production if nothing reads them.
+interface E2EReadiness {
+  swInitDone: boolean;
+  blocklistLoaded: boolean;
+  breachLoaded: boolean;
+}
+const e2eReadiness: E2EReadiness = {
+  swInitDone: false,
+  blocklistLoaded: false,
+  breachLoaded: false,
+};
+(globalThis as typeof globalThis & { __alparslanE2E?: E2EReadiness }).__alparslanE2E = e2eReadiness;
+
 // Debug timing state
 const initTimings: Record<string, number> = { _startedAt: Date.now() };
 
@@ -191,6 +206,7 @@ async function initServiceWorker(): Promise<void> {
   initProgress.step = t.init.ready;
   initProgress.percent = 100;
   initDone = true;
+  e2eReadiness.swInitDone = true;
   resolveInit();
   logger.debug(`Service worker initialized in ${initTimings.total}ms (storage: ${initTimings.storageLoad}ms, cache: ${initTimings.cacheInit}ms)`);
 
@@ -249,9 +265,12 @@ chrome.runtime.onInstalled.addListener(() => {
     })
     .then(() => {
       logger.debug("Built-in blocklist loaded into IndexedDB");
+      e2eReadiness.blocklistLoaded = true;
     })
     .catch(() => {
       logger.warn("Could not load blocklist");
+      // Still mark ready so e2e fixture doesn't hang on transient failures.
+      e2eReadiness.blocklistLoaded = true;
     });
 
   // Schedule periodic list updates (USOM + whitelist + remote blocklist)
@@ -266,10 +285,13 @@ chrome.runtime.onInstalled.addListener(() => {
     .then((data: { breaches: BreachEntry[] }) => {
       return loadBreachDB(data.breaches).then(() => {
         logger.debug("Breach DB stored in IndexedDB: " + String(data.breaches.length) + " entries");
+        e2eReadiness.breachLoaded = true;
       });
     })
     .catch(() => {
       logger.warn("Could not load breach database");
+      // Still mark ready so e2e fixture doesn't hang on transient failures.
+      e2eReadiness.breachLoaded = true;
     });
 
 });
