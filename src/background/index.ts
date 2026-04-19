@@ -310,7 +310,15 @@ const PRIVILEGED_MESSAGE_TYPES = new Set([
 ]);
 
 function isFromExtensionPage(sender: chrome.runtime.MessageSender): boolean {
-  return sender.id === chrome.runtime.id && sender.tab === undefined;
+  if (sender.id !== chrome.runtime.id) return false;
+  // Popup windows, SW, etc. have no `.tab`.
+  if (sender.tab === undefined) return true;
+  // Extension pages opened as tabs (options_page default) DO set `.tab`, but
+  // their `.url` starts with `chrome-extension://<own-id>/`. Content scripts
+  // injected into web pages also have `.tab` set, but `.url` is the host
+  // page URL — not our extension origin.
+  const ownOrigin = `chrome-extension://${chrome.runtime.id}/`;
+  return sender.url?.startsWith(ownOrigin) ?? false;
 }
 
 chrome.runtime.onMessage.addListener(
